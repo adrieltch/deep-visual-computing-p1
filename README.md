@@ -45,3 +45,42 @@ Primary sources: [TorchVision model and preprocessing](https://docs.pytorch.org/
 ## Scope of this iteration
 
 This is one image-only baseline and one training-source validation split. The model is selected solely by its training-source validation ROC AUC. The validation score estimates performance on held-out groups from the supplied sources; it does not establish external HAM10000 performance. The extra images in the source folders that do not appear in `train.csv` are unused.
+
+## Frozen DINOv3 ViT-S/16 probe (pending weight access)
+
+`dinov3_probe.py` is a second, separate experiment. It uses Meta's official
+[`facebook/dinov3-vits16-pretrain-lvd1689m`](https://huggingface.co/facebook/dinov3-vits16-pretrain-lvd1689m)
+at revision `114c1379950215c8b35dfcd4e90a5c251dde0d32`. The backbone is frozen;
+its CLS token and mean image-patch token are concatenated, standardized, and fed
+to a logistic regression classifier (`C=1.0`). The four register tokens are
+excluded from the patch mean. Image preprocessing is loaded from the model's
+own processor. The same seed-42/fold-0 grouped BCN/MSK split gives a direct
+training-source comparison with the MobileNet baseline; validation AUC is the
+primary comparison, with accuracy at the fixed 0.5 threshold reported too.
+The fixed classifier recipe is then refit on all permitted training rows.
+
+Meta gates these weights behind an access agreement. You must request access
+on the model page and authenticate locally with `hf auth login` (or a local
+`HF_TOKEN` environment variable); do not put a token in Git or share it in
+chat. Install the updated environment dependencies, then run:
+
+```sh
+python dinov3_probe.py fit --data-root . --output-dir outputs/dinov3_probe --device auto
+python dinov3_probe.py predict --data-root . --artifact outputs/dinov3_probe/probe.joblib --output outputs/dinov3_probe/submission.csv --device auto
+```
+
+Run `predict` only after the training-source comparison and the inference
+procedure are fixed. It does not read HAM10000 labels or use HAM10000 to tune
+the model. `fit` writes the split manifest, configuration, validation metrics,
+and trained classifier to the ignored `outputs/dinov3_probe/` directory.
+No DINOv3 validation score or submission has been produced yet because this Mac
+does not currently have access to the official weights.
+
+For final disclosure: Meta DINOv3 ViT-S/16 is a 21.6M-parameter general-purpose
+visual foundation model. Meta reports pretraining on its curated LVD-1689M
+collection of public Instagram images; the complete corpus is not public.
+Its weights are distributed under the
+[DINOv3 license](https://github.com/facebookresearch/dinov3/blob/main/LICENSE.md),
+which must be reviewed before use. No HAM10000-specific pretrained model is
+part of this experiment. See the [official model card](https://huggingface.co/facebook/dinov3-vits16-pretrain-lvd1689m)
+and [Transformers DINOv3 documentation](https://huggingface.co/docs/transformers/v4.57.1/en/model_doc/dinov3).
