@@ -1,0 +1,12 @@
+name: skin-baseline
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  - pip:
+      - torch==2.7.0
+      - torchvision==0.22.0
+      - pandas==2.3.0
+      - scikit-learn==1.7.0
+      - Pillow==11.2.1

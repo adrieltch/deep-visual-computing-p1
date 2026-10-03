@@ -1,0 +1,17 @@
+.conda/
+.cache/
+__pycache__/
+*.py[cod]
+.DS_Store
+train_images/
+test_images/
+metadata/
+train.csv
+train_metadata.csv
+test.csv
+test_metadata.csv
+sample_submission.csv
+outputs/
+*.pt
+*.pth
+submission*.csv
