@@ -1,4 +1,4 @@
-# SKIN Generalization: first baseline
+# SKIN Generalization
 
 An image-only binary malignancy classifier for the SKIN Generalization educational competition. It trains on the 22,894 labeled BCN20000, MSK-1, and MSK-2 rows in `train.csv`. HAM10000 is used only by `predict.py` after a checkpoint has been selected on training-source validation data. This model is not for clinical use.
 
@@ -42,9 +42,74 @@ The five-epoch run on this M2 Mac selected epoch 2 from 18,372 training and 4,52
 
 Primary sources: [TorchVision model and preprocessing](https://docs.pytorch.org/vision/main/models/generated/torchvision.models.mobilenet_v3_small.html), [TorchVision license](https://github.com/pytorch/vision/blob/main/LICENSE), and [ImageNet terms of access](https://www.image-net.org/download.php).
 
-## Scope of this iteration
+## Scope of the initial baseline
 
 This is one image-only baseline and one training-source validation split. The model is selected solely by its training-source validation ROC AUC. The validation score estimates performance on held-out groups from the supplied sources; it does not establish external HAM10000 performance. The extra images in the source folders that do not appear in `train.csv` are unused.
+
+## Source-held-out validation
+
+The initial group split contains all three sources in both training and
+validation. To estimate performance when the institution changes, run each
+of BCN20000, MSK-1, and MSK-2 as a wholly held-out validation source. The
+runner compares the original source mix (`natural`) with equal expected
+sampling of the two training sources (`balanced`). The balanced sampler uses
+inverse training-source frequency with replacement. Both variants use the
+same architecture, augmentations, optimizer, seed, and three-epoch budget.
+
+```sh
+python run_cross_source.py --data-root . --output-root outputs/cross_source --epochs 3 --workers 2 --device auto
+python summarize_cross_source.py --root outputs/cross_source --epochs 3
+```
+
+The runner skips completed folds and can be rerun after an interruption. Each
+fold writes its own split manifest, configuration, history, and AUC-selected
+checkpoint. The summary reports each held-out source's best AUC and accuracy
+at the fixed 0.5 threshold, plus the unweighted mean over the three sources.
+Only BCN/MSK images and labels are used in this experiment. These validation
+results can guide development; HAM10000 leaderboard scores cannot.
+
+### Training-source comparison (2026-10-03)
+
+| Recipe | BCN20000 AUC | MSK-1 AUC | MSK-2 AUC | Mean AUC |
+| --- | ---: | ---: | ---: | ---: |
+| MobileNet, natural sampling, epoch 1 | 0.7740 | 0.7492 | 0.8159 | **0.7797** |
+| MobileNet, balanced sampling, epoch 1 | 0.7655 | 0.7464 | 0.7841 | 0.7653 |
+| Frozen DINOv2-S + logistic classifier | 0.7269 | 0.7352 | 0.7960 | 0.7527 |
+| MobileNet, natural sampling, best epoch per held-out source | 0.7740 | 0.8049 | 0.8159 | 0.7982 |
+
+The first-epoch MobileNet rows are a matched comparison. Natural sampling won
+on all three held-out sources. The balanced MSK-2 run was stopped after its
+first epoch because of high image-loading cost; its recorded first-epoch AUC
+completes the matched comparison. The best-per-source row selects a checkpoint
+using each held-out source, so it is a more optimistic estimate. Its best
+epochs were 1, 2, and 1; their median is 1. That is the fixed epoch count for
+the final natural-sampling MobileNet fit on all 22,894 official training rows.
+The DINOv2 classifier used only the other two official sources for each
+held-out source and was not selected. The comparison is recorded in
+`outputs/cross_source/epoch1_summary.json` and
+`outputs/dinov2_probe/config.json`.
+
+These numbers are training-source validation results. They do not establish
+whether the next submission will improve on HAM10000.
+
+### Selected all-training candidate
+
+The selected recipe is MobileNetV3-Small, natural source sampling, and one
+training epoch. It was fitted on all 22,894 official labeled rows. The final
+fit has no validation split and uses the epoch count fixed above.
+
+```sh
+python train.py --data-root . --output-dir outputs/mobilenet_source_cv_final --full-data --source-sampling natural --epochs 1 --workers 2 --device auto
+python predict.py --data-root . --checkpoint outputs/mobilenet_source_cv_final/final.pt --output outputs/mobilenet_source_cv_final/submission.csv --workers 2 --device auto
+```
+
+The checkpoint SHA-256 is
+`1c82161f80a18c8046711dfa0f541e2c3b1487a289aeb03b6f2bf078e9972f85`.
+The submission SHA-256 is
+`d68540db09e5d9d43fa9dfe31f841347f835829a3d7f168cb11c3c3a7b2463d5`.
+The submission checker accepted exactly 10,015 unique IDs and finite
+probabilities in `[0, 1]`. The test images were used only after the recipe was
+fixed from official training-source validation.
 
 ## Frozen DINOv3 ViT-S/16 probe (pending weight access)
 
@@ -84,3 +149,33 @@ Its weights are distributed under the
 which must be reviewed before use. No HAM10000-specific pretrained model is
 part of this experiment. See the [official model card](https://huggingface.co/facebook/dinov3-vits16-pretrain-lvd1689m)
 and [Transformers DINOv3 documentation](https://huggingface.co/docs/transformers/v4.57.1/en/model_doc/dinov3).
+
+### Public DINOv2 alternative
+
+The same frozen-feature probe also supports Meta's public
+[`facebook/dinov2-small`](https://huggingface.co/facebook/dinov2-small) at
+revision `ed25f3a31f01632728cabb09d1542f84ab7b0056`. It uses the model's
+own image processor and concatenates the CLS and mean patch embeddings. A
+logistic classifier is fitted separately on the other two official training
+sources for each source-held-out AUC, then the fixed recipe is refitted on all
+official training rows for inference. No HAM10000 information is used in fitting
+or choosing the probe.
+
+```sh
+python dino_probe.py fit --backbone dinov2-small --source-holdouts --data-root . --output-dir outputs/dinov2_probe --device auto
+```
+
+If it is selected on training-source validation, its fixed classifier can be
+used for inference:
+
+```sh
+python dino_probe.py predict --artifact outputs/dinov2_probe/probe.joblib --output outputs/dinov2_probe/submission.csv --device auto
+```
+
+The DINOv2 probe was not selected in the 2026-10-03 training-source comparison.
+
+Meta reports that DINOv2 ViT-S/14 was pretrained without labels on LVD-142M;
+the complete image corpus is not public. Its code and model weights are
+distributed under Apache 2.0. See the
+[official model card](https://github.com/facebookresearch/dinov2/blob/main/MODEL_CARD.md)
+and [license](https://github.com/facebookresearch/dinov2/blob/main/LICENSE).

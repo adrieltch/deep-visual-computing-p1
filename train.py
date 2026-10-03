@@ -1,4 +1,4 @@
-"""Train the first SKIN Generalization image-only baseline."""
+"""Train the SKIN Generalization MobileNet baseline and source-holdout variants."""
 
 from __future__ import annotations
 
@@ -14,11 +14,11 @@ import numpy as np
 import torch
 from sklearn.metrics import accuracy_score, roc_auc_score
 from torch import nn
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
 from torchvision import __version__ as torchvision_version
 from torchvision.models import MobileNet_V3_Small_Weights, mobilenet_v3_small
 
-from skin_baseline.data import LesionDataset, make_split
+from skin_baseline.data import SOURCES, LesionDataset, make_split
 
 
 WEIGHTS = MobileNet_V3_Small_Weights.IMAGENET1K_V1
@@ -73,22 +73,32 @@ def train(args: argparse.Namespace) -> None:
     device = device_from_arg(args.device)
 
     frame = make_split(data_root, seed=args.seed, fold=args.fold)
+    if args.full_data:
+        frame["split"] = "train"
+    elif args.holdout_source is not None:
+        frame["split"] = np.where(frame.source.eq(args.holdout_source), "val", "train")
     manifest = frame[["ID", "target", "source", "group_id", "split"]]
     manifest.to_csv(output_dir / "split.csv", index=False)
     training = frame.loc[frame.split == "train"].reset_index(drop=True)
     validation = frame.loc[frame.split == "val"].reset_index(drop=True)
-    if training.empty or validation.empty:
+    if training.empty or (validation.empty and not args.full_data):
         raise ValueError("The group split produced an empty partition")
     generator = torch.Generator().manual_seed(args.seed)
+    sampler = None
+    if args.source_sampling == "balanced":
+        source_counts = training.source.value_counts().to_dict()
+        weights = training.source.map(lambda source: 1.0 / source_counts[source]).to_numpy(dtype=np.float64)
+        sampler = WeightedRandomSampler(weights, num_samples=len(training), replacement=True, generator=generator)
     train_loader = DataLoader(
         LesionDataset(training, training=True),
         batch_size=args.batch_size,
-        shuffle=True,
+        shuffle=sampler is None,
+        sampler=sampler,
         num_workers=args.workers,
         generator=generator,
         persistent_workers=args.workers > 0,
     )
-    val_loader = DataLoader(
+    val_loader = None if args.full_data else DataLoader(
         LesionDataset(validation),
         batch_size=args.batch_size,
         shuffle=False,
@@ -108,6 +118,9 @@ def train(args: argparse.Namespace) -> None:
         "input_size": 224,
         "seed": args.seed,
         "fold": args.fold,
+        "holdout_source": args.holdout_source,
+        "source_sampling": args.source_sampling,
+        "full_data": args.full_data,
         "epochs": args.epochs,
         "batch_size": args.batch_size,
         "lr": args.lr,
@@ -142,6 +155,21 @@ def train(args: argparse.Namespace) -> None:
             running_loss += loss.item() * images.size(0)
             seen += images.size(0)
         scheduler.step()
+        if args.full_data:
+            result = {
+                "epoch": epoch,
+                "train_loss": running_loss / seen,
+                "elapsed_minutes": round((time.monotonic() - start) / 60, 2),
+            }
+            history.append(result)
+            (output_dir / "history.json").write_text(json.dumps(history, indent=2) + "\n")
+            print(json.dumps(result), flush=True)
+            if epoch == args.epochs:
+                checkpoint = {"model_state": model.state_dict(), "epoch": epoch, "config": config}
+                temporary = output_dir / "final.pt.tmp"
+                torch.save(checkpoint, temporary)
+                temporary.replace(output_dir / "final.pt")
+            continue
         overall, by_source = evaluate(model, val_loader, device, validation.source.tolist())
         result = {
             "epoch": epoch,
@@ -159,7 +187,10 @@ def train(args: argparse.Namespace) -> None:
             temporary = output_dir / "best.pt.tmp"
             torch.save(checkpoint, temporary)
             temporary.replace(output_dir / "best.pt")
-    print(json.dumps({"event": "finished", "best_auc": best_auc, "checkpoint": str(output_dir / "best.pt")}), flush=True)
+    if args.full_data:
+        print(json.dumps({"event": "finished", "checkpoint": str(output_dir / "final.pt")}), flush=True)
+    else:
+        print(json.dumps({"event": "finished", "best_auc": best_auc, "checkpoint": str(output_dir / "best.pt")}), flush=True)
 
 
 def main() -> None:
@@ -174,10 +205,17 @@ def main() -> None:
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--fold", type=int, default=0)
+    parser.add_argument("--holdout-source", choices=tuple(SOURCES))
+    parser.add_argument("--source-sampling", choices=("natural", "balanced"), default="natural")
+    parser.add_argument("--full-data", action="store_true", help="Fit all official training rows for a fixed epoch count")
     parser.add_argument("--device", choices=("auto", "cpu", "mps"), default="auto")
     args = parser.parse_args()
     if args.epochs < 1 or args.batch_size < 1 or args.workers < 0 or args.cpu_threads < 1:
         parser.error("epochs, batch size, and CPU threads must be positive; workers cannot be negative")
+    if args.full_data and args.holdout_source is not None:
+        parser.error("--full-data and --holdout-source cannot be combined")
+    if (args.full_data or args.holdout_source is not None or args.source_sampling != "natural") and args.output_dir == Path("outputs/baseline"):
+        parser.error("use a separate --output-dir for source-holdout, balanced, or full-data training")
     train(args)
 
 
